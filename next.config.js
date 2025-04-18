@@ -1,6 +1,15 @@
-module.exports = {
-  env: {
-    AZURE_CLIENT_ID: process.env.AZURE_CLIENT_ID,
-    AZURE_TENANT_ID: process.env.AZURE_TENANT_ID,
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+  images: {
+    remotePatterns: [
+      {
+        protocol: 'https',
+        hostname: 'graph.microsoft.com',
+        port: '',
+        pathname: '/v1.0/me/drive/items/**',
+      },
+    ],
   },
-};
+}
+
+module.exports = nextConfig

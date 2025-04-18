@@ -12,9 +12,9 @@ import Image from "next/image";
 
 const msalConfig = {
   auth: {
-    clientId: process.env.AZURE_CLIENT_ID,
-    authority: `https://login.microsoftonline.com/${process.env.AZURE_TENANT_ID}`,
-    redirectUri: process.env.AZURE_REDIRECT_URI || "http://localhost:3001",
+    clientId: process.env.NEXT_PUBLIC_AZURE_CLIENT_ID,
+    authority: `https://login.microsoftonline.com/${process.env.NEXT_PUBLIC_AZURE_TENANT_ID}`,
+    redirectUri: process.env.NEXT_PUBLIC_AZURE_REDIRECT_URI || "http://localhost:3000",
   },
   cache: {
     cacheLocation: "sessionStorage",
@@ -24,45 +24,72 @@ const msalConfig = {
 
 let pca = new PublicClientApplication(msalConfig);
 
-async function getAccessToken() {
-  try {
-    const accounts = pca.getAllAccounts();
-    if (accounts.length > 0) {
-      const silentRequest = {
-        account: accounts[0],
-        scopes: ["User.Read", "Files.Read.All"],
-      };
+async function initializePca() {
+  await pca.initialize();
+}
 
-      try {
-        const response = await pca.acquireTokenSilent(silentRequest);
-        console.log("アクセストークン (サイレント):", response.accessToken);
-        return response.accessToken;
-      } catch (error) {
-        console.error("Silent token acquisition failed", error);
-        if (error instanceof InteractionRequiredAuthError) {
-          try {
-            const response = await pca.acquireTokenPopup({
-              scopes: ["User.Read", "Files.Read.All"],
-            });
-            console.log(
-              "アクセストークン (ポップアップ):",
-              response.accessToken
-            );
-            return response.accessToken;
-          } catch (popupError) {
-            console.error("Popup token acquisition failed", popupError);
+async function getAccessToken(code) {
+  if (code) {
+    try {
+      const response = await fetch('/api/token', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ code }),
+      });
+
+      const data = await response.json();
+      if (response.ok) {
+        console.log("アクセストークン (コード):", data.access_token);
+        return data.access_token;
+      } else {
+        console.error("Failed to retrieve access token", data);
+        return null;
+      }
+    } catch (error) {
+      console.error("Error exchanging code for token", error);
+      return null;
+    }
+  } else {
+    try {
+      const accounts = pca.getAllAccounts();
+      if (accounts.length > 0) {
+        const silentRequest = {
+          account: accounts[0],
+          scopes: ["User.Read", "Files.Read.All"],
+        };
+
+        try {
+          const response = await pca.acquireTokenSilent(silentRequest);
+          console.log("アクセストークン (サイレント):", response.accessToken);
+          return response.accessToken;
+        } catch (error) {
+          console.error("Silent token acquisition failed", error);
+          if (error instanceof InteractionRequiredAuthError) {
+            try {
+              const response = await pca.acquireTokenPopup({
+                scopes: ["User.Read", "Files.Read.All"],
+              });
+              console.log(
+                "アクセストークン (ポップアップ):", response.accessToken
+              );
+              return response.accessToken;
+            } catch (popupError) {
+              console.error("Popup token acquisition failed", popupError);
+            }
           }
         }
       }
+      return null;
+    } catch (error) {
+      console.error("Something went wrong", error);
+      return null;
     }
-    return null;
-  } catch (error) {
-    console.error("Something went wrong", error);
-    return null;
+    }
   }
-}
 
-async function getOneDriveFiles(accessToken) {
+async function getOneDriveFiles(accessToken, path) {
   if (!accessToken) {
     return [];
   }
@@ -73,30 +100,52 @@ async function getOneDriveFiles(accessToken) {
     },
   });
 
-  const files = await client.api("/me/drive/root/children").get();
-  console.log("APIレスポンス:", fil);
-  console.log("valueの中身:", fil.value);
+  const apiPath = path === "/" ? "/me/drive/root/children" : `/me/drive/root:${path}:/children`;
+  const files = await client.api(apiPath).get();
+  console.log("APIレスポンス:", files);
+  console.log("valueの中身:", files.value);
   return files.value;
+}
+
+function getParentPath(path) {
+  if (path === "/") {
+    return null;
+  }
+  const parts = path.split("/");
+  parts.pop();
+  return parts.length > 1 ? parts.join("/") : "/";
 }
 
 export default function Home() {
   const [files, setFiles] = useState([]);
   const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [accessToken, setAccessToken] = useState(null);
   const router = useRouter();
   const searchParams = useSearchParams();
   const code = searchParams.get("code");
+  const dir = searchParams.get("dir") || "/";
 
   useEffect(() => {
-    if (typeof window !== "undefined") {
-      if (code) {
-        async function loadFiles() {
+    async function initializeAndLoadFiles() {
+      await initializePca();
+      if (typeof window !== "undefined") {
+        // localStorageからログイン状態を読み込む
+        const storedIsLoggedIn = localStorage.getItem('isLoggedIn') === 'true';
+        setIsLoggedIn(storedIsLoggedIn);
+
+        if (code) {
           try {
-            const accessToken = await getAccessToken();
-            if (accessToken) {
+            const token = await getAccessToken(code);
+            console.log(token);
+            if (token) {
+              localStorage.setItem('accessToken', token); // アクセストークンをlocalStorageに保存
+              localStorage.setItem('isLoggedIn', 'true'); // ログイン状態をlocalStorageに保存
               setIsLoggedIn(true);
-              const oneDriveFiles = await getOneDriveFiles(accessToken);
+              setAccessToken(token);
+              const oneDriveFiles = await getOneDriveFiles(token, dir);
               console.log("OneDrive ファイル:", oneDriveFiles);
               setFiles(oneDriveFiles);
+              router.replace('/'); // codeパラメータを削除
             } else {
               setIsLoggedIn(false);
             }
@@ -104,16 +153,36 @@ export default function Home() {
             console.error("loadFiles error", error);
             setIsLoggedIn(false);
           }
+        } else {
+          // localStorageからアクセストークンを読み込む
+          const storedAccessToken = localStorage.getItem('accessToken');
+          if (storedAccessToken) {
+            try {
+              localStorage.setItem('isLoggedIn', 'true'); // ログイン状態をlocalStorageに保存
+              setIsLoggedIn(true);
+              setAccessToken(storedAccessToken);
+              const oneDriveFiles = await getOneDriveFiles(storedAccessToken, dir);
+              console.log("OneDrive ファイル (localStorage):", oneDriveFiles);
+              setFiles(oneDriveFiles);
+            } catch (error) {
+              console.error("loadFiles error", error);
+              setIsLoggedIn(false);
+              localStorage.removeItem('accessToken'); // エラーが発生した場合はlocalStorageから削除
+              localStorage.removeItem('isLoggedIn'); // ログイン状態をlocalStorageから削除
+              // ログイン画面にリダイレクト
+              router.push('/');
+            }
+          }
         }
-        loadFiles();
       }
     }
-  }, [code]);
+    initializeAndLoadFiles();
+  }, [code, router, setIsLoggedIn, dir]);
 
   const handleSignIn = async () => {
-    const clientId = process.env.AZURE_CLIENT_ID;
-    const tenantId = process.env.AZURE_TENANT_ID;
-    const redirectUri = "http://localhost:3001";
+    const clientId = process.env.NEXT_PUBLIC_AZURE_CLIENT_ID;
+    const tenantId = process.env.NEXT_PUBLIC_AZURE_TENANT_ID;
+    const redirectUri = "http://localhost:3000";
     const scope = "User.Read Files.Read.All";
     const state = "12345";
 
@@ -121,48 +190,96 @@ export default function Home() {
     window.location.href = authUrl;
   };
 
+  const parentPath = getParentPath(dir);
+
+  const imageFiles = files.filter(file => file.file && file.file.mimeType.startsWith('image/'));
+
   return (
     <main className="flex min-h-screen flex-col items-center justify-between p-24">
-      <h1>OneDrive Files</h1>
+      <h1 className="text-2xl font-bold mb-4">OneDrive Files</h1>
       {isLoggedIn ? (
         <>
-          <p>OneDrive にログインしています</p>
+          <p className="mb-2">OneDrive にログインしています</p>
           <button
+            className="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded mb-4"
             onClick={() => {
-              pca.logoutRedirect({
-                postLogoutRedirectUri: "http://localhost:3001",
-              });
+              localStorage.removeItem('accessToken'); // アクセストークンをlocalStorageから削除
+              localStorage.removeItem('isLoggedIn'); // ログイン状態をlocalStorageから削除
+              if (pca) {
+                pca.logoutRedirect({
+                  postLogoutRedirectUri: "http://localhost:3000",
+                });
+              }
             }}
           >
             ログアウト
           </button>
-          {files.length > 0 ? (
-            <table>
-              <thead>
-                <tr>
-                  <th>名前</th>
-                  <th>種類</th>
-                  <th>更新日時</th>
-                </tr>
-              </thead>
-              <tbody>
-                {files.map((file) => (
-                  <tr key={file.id}>
-                    <td>{file.name}</td>
-                    <td>{file.fileSystemInfo?.fileType || "フォルダ"}</td>
-                    <td>
-                      {new Date(file.lastModifiedDateTime).toLocaleString()}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          {parentPath && (
+            <a
+              className="text-blue-500 hover:text-blue-700 mb-4"
+              href={`/?dir=${parentPath}`}
+            >
+              上の階層へ
+            </a>
+          )}
+          {imageFiles.length > 0 ? (
+            <div className="flex flex-wrap justify-center">
+              {imageFiles.map(file => (
+                <div key={file.id} className="m-2">
+                  <Image
+                    src={`https://graph.microsoft.com/v1.0/me/drive/items/${file.id}/content?access_token=${accessToken}`}
+                    alt={file.name}
+                    width={200}
+                    height={200}
+                    onError={(e) => {
+                      e.target.onerror = null;
+                      e.target.src = "/file.svg";
+                    }}
+                  />
+                </div>
+              ))}
+            </div>
           ) : (
-            <p>ファイルが見つかりませんでした。</p>
+            <>
+              <p>ファイルが見つかりませんでした。</p>
+              <table className="table-auto">
+                <thead>
+                  <tr className="bg-gray-200">
+                    <th className="px-4 py-2">名前</th>
+                    <th className="px-4 py-2">種類</th>
+                    <th className="px-4 py-2">更新日時</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {files.map((file) => (
+                    <tr key={file.id}>
+                      <td className="border px-4 py-2">
+                        {file.folder ? (
+                          <a
+                            className="text-blue-500 hover:text-blue-700"
+                            href={`/?dir=${dir === "/" ? "/" + file.name : dir + "/" + file.name}`}
+                          >
+                            {file.name}
+                          </a>
+                        ) : (
+                          file.name
+                        )}
+                      </td>
+                      <td className="border px-4 py-2">
+                        {file.fileSystemInfo?.fileType || (file.folder ? "フォルダ" : "ファイル")}
+                      </td>
+                      <td className="border px-4 py-2">
+                        {new Date(file.lastModifiedDateTime).toLocaleString()}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </>
           )}
         </>
       ) : (
-        <button onClick={handleSignIn}>OneDrive にログイン</button>
+        <button className="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded" onClick={handleSignIn}>OneDrive にログイン</button>
       )}
     </main>
   );
